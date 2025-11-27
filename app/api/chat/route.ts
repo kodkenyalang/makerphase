@@ -4,7 +4,7 @@ import { chatbotGraph } from "@/src/agent";
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { input } = body;
+    const { input, storeId } = body;
 
     if (!input || typeof input !== "string") {
       return NextResponse.json(
@@ -20,19 +20,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Call the chatbot graph from agent.ts
-    const result = await chatbotGraph({ input });
+    console.log("Chat request:", { input: input.substring(0, 50), storeId });
+    console.log("Using endpoints:", {
+      chat: process.env.OPENAI_CHAT_BASE_URL || "default",
+      embeddings: process.env.OPENAI_EMBEDDINGS_BASE_URL || "default",
+    });
+
+    // Call the chatbot graph from agent.ts with optional storeId
+    const result = await chatbotGraph({ input, storeId });
 
     return NextResponse.json({
-      output: result.output,
-      context: result.context,
+      answer: result.answer,
+      citations: result.citations,
+      confidence: result.confidence,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
     console.error("Chat API error:", error);
     const message = error instanceof Error ? error.message : "Internal server error";
+    const fullError = error instanceof Error ? error.stack : String(error);
+    console.error("Full error details:", fullError);
     return NextResponse.json(
-      { error: message },
+      { error: message, details: fullError },
       { status: 500 }
     );
   }
