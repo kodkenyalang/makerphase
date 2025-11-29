@@ -1,33 +1,13 @@
+
+
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { Document } from "@langchain/core/documents";
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import path from "path";
 import fs from "fs";
-
-// Simple text splitter implementation
-function splitText(text: string, chunkSize = 1000, chunkOverlap = 200): string[] {
-  const chunks: string[] = [];
-  let startIndex = 0;
-
-  while (startIndex < text.length) {
-    let endIndex = startIndex + chunkSize;
-    if (endIndex > text.length) {
-      endIndex = text.length;
-    }
-
-    chunks.push(text.slice(startIndex, endIndex));
-    startIndex = endIndex - chunkOverlap;
-
-    if (startIndex < 0) {
-      startIndex = 0;
-    }
-
-    if (startIndex >= text.length) {
-      break;
-    }
-  }
-
-  return chunks;
-}
+import { writeFile, mkdir } from "fs/promises";
+import { tmpdir } from "os";
 
 // Simple in-memory vector store (since FAISS is not available)
 interface VectorStoreData {
@@ -64,66 +44,102 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Create embeddings for text chunks and store
+ * Create embeddings for PDF documents using LangChain's PDFLoader
  */
 export async function createVectorStore(
-  fileName: string,
-  textContent: string,
+  filePath: string,
   storeId: string
-): Promise<void> {
-  const embeddings = new OpenAIEmbeddings({
-    apiKey: process.env.OPENAI_API_KEY,
-    model: process.env.OPENAI_EMBEDDINGS_BASE_URL ? "openai/text-embedding-3-small" : "text-embedding-3-small",
-    configuration: {
-      baseURL: process.env.OPENAI_EMBEDDINGS_BASE_URL || "https://api.openai.com/v1",
-    },
-  });
+): Promise<{ pageCount: number; chunkCount: number }> {
+  try {
+    // Load PDF using LangChain's PDFLoader
+    const loader = new PDFLoader(filePath, {
+      splitPages: true, // One document per page for better retrieval granularity
+    });
 
-  // Split text into chunks
-  const chunks = splitText(textContent, 1000, 200);
+    const docs = await loader.load();
 
-  // Create embeddings
-  const embeddingVectors = await embeddings.embedDocuments(chunks);
+    if (!docs || docs.length === 0) {
+      throw new Error("PDF contains no extractable text");
+    }
 
-  // Create metadata
-  const metadata = chunks.map((chunk: string, idx: number) => ({
-    source: fileName,
-    chunkIndex: idx,
-    fileName: fileName,
-  }));
+    const pageCount = docs.length;
 
-  // Store in memory and disk
-  const storeData: VectorStoreData = {
-    chunks,
-    embeddings: embeddingVectors,
-    metadata,
-  };
+    // Split documents into chunks using RecursiveCharacterTextSplitter
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 1000,
+      chunkOverlap: 200,
+      separators: ["\n\n", "\n", " ", ""],
+    });
 
-  vectorStoreCache.set(storeId, storeData);
+    const chunks = await splitter.splitDocuments(docs);
 
-  // Save to disk
-  const storePath = path.join(VECTOR_STORE_DIR, storeId);
-  if (!fs.existsSync(storePath)) {
-    fs.mkdirSync(storePath, { recursive: true });
-  }
+    if (chunks.length === 0) {
+      throw new Error("Failed to split PDF into chunks");
+    }
 
-  fs.writeFileSync(
-    path.join(storePath, "store.json"),
-    JSON.stringify(storeData, null, 2)
-  );
+    const chunkCount = chunks.length;
 
-  fs.writeFileSync(
-    path.join(storePath, "metadata.json"),
-    JSON.stringify(
-      {
-        fileName,
-        createdAt: new Date().toISOString(),
-        chunkCount: chunks.length,
+    // Create embeddings
+    const embeddings = new OpenAIEmbeddings({
+      apiKey: process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_EMBEDDINGS_BASE_URL ? "openai/text-embedding-3-small" : "text-embedding-3-small",
+      configuration: {
+        baseURL: process.env.OPENAI_EMBEDDINGS_BASE_URL || "https://api.openai.com/v1",
       },
-      null,
-      2
-    )
-  );
+    });
+
+    console.log(`Creating embeddings for ${chunks.length} chunks...`);
+    const embeddingVectors = await embeddings.embedDocuments(
+      chunks.map((chunk) => chunk.pageContent)
+    );
+
+    // Create metadata array with enhanced information
+    const metadata = chunks.map((chunk, idx) => ({
+      source: chunk.metadata.source as string,
+      pageNumber: chunk.metadata.loc?.pageNumber || 0,
+      chunkIndex: idx,
+      fileName: path.basename(chunk.metadata.source as string),
+    }));
+
+    // Store in memory and disk
+    const storeData: VectorStoreData = {
+      chunks: chunks.map((chunk) => chunk.pageContent),
+      embeddings: embeddingVectors,
+      metadata,
+    };
+
+    vectorStoreCache.set(storeId, storeData);
+
+    // Save to disk
+    const storePath = path.join(VECTOR_STORE_DIR, storeId);
+    await mkdir(storePath, { recursive: true });
+
+    await writeFile(
+      path.join(storePath, "store.json"),
+      JSON.stringify(storeData, null, 2)
+    );
+
+    await writeFile(
+      path.join(storePath, "metadata.json"),
+      JSON.stringify(
+        {
+          fileName: path.basename(filePath),
+          createdAt: new Date().toISOString(),
+          chunkCount: chunks.length,
+          pageCount,
+          textLength: chunks.reduce((sum, chunk) => sum + chunk.pageContent.length, 0),
+        },
+        null,
+        2
+      )
+    );
+
+    console.log(`Vector store created: ${chunkCount} chunks from ${pageCount} pages`);
+    return { pageCount, chunkCount };
+  } catch (err) {
+    console.error("Error creating vector store:", err);
+    throw err;
+  }
 }
 
 /**
@@ -141,9 +157,14 @@ export async function loadVectorStore(
   const storePath = path.join(VECTOR_STORE_DIR, storeId);
   if (fs.existsSync(storePath)) {
     try {
-      const storeData = JSON.parse(
-        fs.readFileSync(path.join(storePath, "store.json"), "utf-8")
-      ) as VectorStoreData;
+      const storeDataStr = await new Promise<string>((resolve, reject) => {
+        fs.readFile(path.join(storePath, "store.json"), "utf-8", (err, data) => {
+          if (err) reject(err);
+          else resolve(data);
+        });
+      });
+
+      const storeData = JSON.parse(storeDataStr) as VectorStoreData;
 
       // Cache it
       vectorStoreCache.set(storeId, storeData);
@@ -163,7 +184,7 @@ export async function loadVectorStore(
 export async function retrieveFromVectorStore(
   storeId: string,
   query: string,
-  topK: number = 4
+  topK: number = 16 // FIX: Increased from 4 to 8 for better recall
 ): Promise<
   Array<{
     pageContent: string;
