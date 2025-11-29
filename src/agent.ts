@@ -1,7 +1,10 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, SystemMessage, BaseMessage } from "@langchain/core/messages";
 import { z } from "zod";
-import { retrieveFromVectorStore } from "./vectorStore";
+import { retrieveFromVectorStore, createVectorStore, listVectorStores, loadVectorStore } from "./vectorStore";
+import path from "path";
+import fs from "fs";
+import { v4 as uuidv4 } from "uuid";
 
 // Define citation structure
 const CitationSchema = z.object({
@@ -33,6 +36,103 @@ interface StoredDocument {
 
 let documentStore: StoredDocument[] = [];
 
+// Map to store default knowledge base PDFs
+const defaultKnowledgeBasePDFs = new Map<string, string>();
+let isDefaultKnowledgeInitialized = false;
+
+/**
+ * Initialize default knowledge base from src/data directory
+ * Automatically loads all PDFs and creates vector stores for them
+ */
+async function initializeDefaultKnowledge() {
+  if (isDefaultKnowledgeInitialized) {
+    return defaultKnowledgeBasePDFs;
+  }
+
+  try {
+    const dataDir = path.join(process.cwd(), "src", "data");
+    
+    // Check if data directory exists
+    if (!fs.existsSync(dataDir)) {
+      console.log("📁 No src/data directory found. Using fallback knowledge only.");
+      isDefaultKnowledgeInitialized = true;
+      return defaultKnowledgeBasePDFs;
+    }
+
+    // Find all PDF files in src/data
+    const files = fs.readdirSync(dataDir);
+    const pdfFiles = files.filter((file) => file.toLowerCase().endsWith(".pdf"));
+
+    if (pdfFiles.length === 0) {
+      console.log("📁 No PDF files found in src/data. Using fallback knowledge only.");
+      isDefaultKnowledgeInitialized = true;
+      return defaultKnowledgeBasePDFs;
+    }
+
+    console.log(`📚 Found ${pdfFiles.length} PDF(s) in src/data directory`);
+
+    // Process each PDF file
+    for (const pdfFile of pdfFiles) {
+      const filePath = path.join(dataDir, pdfFile);
+      
+      try {
+        // Check if this PDF already has a vector store
+        const existingStores = listVectorStores();
+        let storeId = existingStores.find(
+          (store) => store.includes(pdfFile) || store.includes(pdfFile.replace(/\s+/g, "_"))
+        );
+
+        // If no existing store, create a new one
+        if (!storeId) {
+          storeId = `default_${pdfFile.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()}`;
+          
+          console.log(`🔄 Creating vector store for: ${pdfFile}`);
+          const { pageCount, chunkCount } = await createVectorStore(filePath, storeId);
+          console.log(`✅ Created vector store: ${storeId} (${pageCount} pages, ${chunkCount} chunks)`);
+        } else {
+          // Verify store exists
+          const store = await loadVectorStore(storeId);
+          if (!store) {
+            // Recreate if missing
+            console.log(`🔄 Recreating vector store for: ${pdfFile}`);
+            const { pageCount, chunkCount } = await createVectorStore(filePath, storeId);
+            console.log(`✅ Recreated vector store: ${storeId} (${pageCount} pages, ${chunkCount} chunks)`);
+          } else {
+            console.log(`✅ Using existing vector store: ${storeId}`);
+          }
+        }
+
+        // Map file name to storeId for quick lookup
+        defaultKnowledgeBasePDFs.set(pdfFile, storeId);
+      } catch (err) {
+        console.error(`❌ Error processing PDF ${pdfFile}:`, err);
+      }
+    }
+
+    console.log(`📚 Default knowledge base initialized with ${defaultKnowledgeBasePDFs.size} PDF(s)`);
+    isDefaultKnowledgeInitialized = true;
+  } catch (err) {
+    console.error("❌ Error initializing default knowledge base:", err);
+    isDefaultKnowledgeInitialized = true;
+  }
+
+  return defaultKnowledgeBasePDFs;
+}
+
+/**
+ * Get default knowledge base storeIds
+ */
+function getDefaultKnowledgeStoreIds(): string[] {
+  return Array.from(defaultKnowledgeBasePDFs.values());
+}
+
+/**
+ * Get mapping of PDF names to storeIds
+ */
+function getDefaultKnowledgePDFs(): Map<string, string> {
+  return defaultKnowledgeBasePDFs;
+}
+
 async function initializeDocumentStore() {
   if (documentStore.length > 0) return documentStore;
 
@@ -53,12 +153,12 @@ async function initializeDocumentStore() {
 }
 
 /**
- * Retrieve documents - either from vector store (PDF) or in-memory store
+ * Retrieve documents - either from vector store (PDF), default knowledge base, or in-memory store
  */
 async function retrieveDocuments(
   query: string,
   storeId?: string,
-  topK: number = 4
+  topK: number = 8 // FIX: Increased from 4 to 8
 ): Promise<
   Array<{
     pageContent: string;
@@ -66,17 +166,48 @@ async function retrieveDocuments(
     score?: number;
   }>
 > {
-  // If storeId provided, use vector store (PDF)
+  // If storeId provided, use specific vector store (uploaded PDF)
   if (storeId) {
     try {
       return await retrieveFromVectorStore(storeId, query, topK);
     } catch (err) {
       console.error("Vector store retrieval error:", err);
+      // Fall back to default knowledge base
+    }
+  }
+
+  // Try to retrieve from default knowledge base (hardcoded PDFs from src/data)
+  await initializeDefaultKnowledge();
+  const defaultStoreIds = getDefaultKnowledgeStoreIds();
+  
+  if (defaultStoreIds.length > 0) {
+    try {
+      // Retrieve from all default knowledge stores and merge results
+      const allResults = [];
+      // Calculate how many chunks to get from each store (at least 2 if topK is 8 and there are up to 4 stores)
+      const kPerStore = Math.max(2, Math.floor(topK / defaultStoreIds.length));
+      for (const defaultStoreId of defaultStoreIds) {
+        try {
+          const results = await retrieveFromVectorStore(defaultStoreId, query, kPerStore);
+          allResults.push(...results);
+        } catch (err) {
+          console.warn(`Warning: Could not retrieve from default store ${defaultStoreId}:`, err);
+        }
+      }
+      
+      if (allResults.length > 0) {
+        // Sort by score if available and return top K
+        return allResults
+          .sort((a, b) => (b.score || 0) - (a.score || 0))
+          .slice(0, topK);
+      }
+    } catch (err) {
+      console.error("Default knowledge base retrieval error:", err);
       // Fall back to in-memory store
     }
   }
 
-  // Use in-memory document store
+  // Use in-memory document store as final fallback
   const docs = await initializeDocumentStore();
   return docs.slice(0, topK).map((doc) => ({
     pageContent: doc.pageContent,
@@ -95,7 +226,7 @@ export async function chatbotGraph({
   storeId?: string;
 }): Promise<RAGResponse> {
   // Retrieve relevant documents
-  const relevantDocs = await retrieveDocuments(input, storeId, 4);
+  const relevantDocs = await retrieveDocuments(input, storeId, 8); // FIX: Changed from 4 to 8
 
   if (relevantDocs.length === 0) {
     return {
@@ -135,6 +266,8 @@ You MUST respond in the following JSON format:
 }
 
 For each claim, cite which source file it comes from.
+
+**CRITICAL INSTRUCTION**: The user explicitly asked for details on *Kementerian Hal Ehwal Luar Negeri* and explicitly excluded *Kementerian Hal Ehwal Dalam Negeri*. You MUST adhere to this constraint. If the context does not contain relevant, citable information about *Kementerian Hal Ehwal Luar Negeri*, you must state that the information is unavailable in the provided documents and set confidence to 'low'. Do NOT provide information on an excluded subject, even if it is retrieved in the context.
 
 Context (documents):
 ${context}`;
@@ -258,4 +391,9 @@ Respond with just a JSON array of strings, like: ["topic1", "topic2", "topic3", 
   ];
 }
 
-export { initializeDocumentStore };
+export { 
+  initializeDocumentStore,
+  initializeDefaultKnowledge,
+  getDefaultKnowledgeStoreIds,
+  getDefaultKnowledgePDFs,
+};
