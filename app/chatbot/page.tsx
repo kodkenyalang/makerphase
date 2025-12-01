@@ -141,10 +141,10 @@ export default function ChatbotPage() {
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <div className="bg-slate-950 border-b border-slate-700 p-6 shadow-lg">
-          <h1 className="text-3xl font-bold text-white">'35' Chat</h1>
+          <h1 className="text-3xl font-bold text-white">'Legal Assistant' Chat</h1>
           <p className="text-slate-400 mt-1">
             {currentStoreId
-              ? "📄 PDF Mode - Powered by RAG"
+              ? "📄 PDF Mode - Powered by AI"
               : "💬 General Chat Mode"}{" "}
             | Built by Aaron Ong
           </p>
