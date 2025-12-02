@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSuggestedTopics } from "@/src/agent";
+// This route uses Node APIs (fs, LangChain) — force Node runtime
+export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   try {

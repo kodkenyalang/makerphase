@@ -1,98 +1,71 @@
 import { NextRequest, NextResponse } from "next/server";
+// Force Node runtime for this route since it uses Node APIs (fs, pdf-parse, etc.)
+export const runtime = "nodejs";
 import { v4 as uuidv4 } from "uuid";
-import { createVectorStore, saveVectorStoreMetadata, listVectorStores } from "@/src/vectorStore";
-import pdf from "pdf-parse";
+import { createVectorStore, listVectorStores, saveVectorStoreMetadata } from "@/src/vectorStore";
+import path from "path";
+import fs from "fs/promises";
+
 
 /**
- * Handle PDF file upload and create vector store
- * Accepts both FormData (file upload) and JSON (pre-parsed text)
+ * Handle PDF file upload and create vector store using LangChain
+ * Accepts FormData (PDF file upload)
  */
 export async function POST(request: NextRequest) {
   try {
     const contentType = request.headers.get("content-type") || "";
     let fileName: string;
-    let textContent: string;
-    let pageCount: number;
+    let pageCount: number = 0;
+    let textLength: number = 0;
+    let storeId: string = uuidv4();
 
-    if (contentType.includes("application/json")) {
-      // 1. Handle Frontend pre-parsed JSON
-      const body = await request.json();
-      fileName = body.fileName;
-      textContent = body.textContent;
-      pageCount = body.pageCount || 0;
-
-      if (!fileName || !textContent) {
-        return NextResponse.json(
-          { error: "fileName and textContent are required" },
-          { status: 400 }
-        );
-      }
-    } else {
-      // 2. Handle Multipart FormData with PDF file
-      const formData = await request.formData();
-      const file = formData.get("pdf") as File;
-
-      if (!file) {
-        return NextResponse.json(
-          { error: "No PDF file provided" },
-          { status: 400 }
-        );
-      }
-
-      if (!file.name.toLowerCase().endsWith(".pdf")) {
-        return NextResponse.json(
-          { error: "File must be a PDF" },
-          { status: 400 }
-        );
-      }
-
-      // Process PDF in memory (Serverless friendly)
-      const buffer = await file.arrayBuffer();
-      const bytes = Buffer.from(buffer);
-
-      let pdfData;
-      try {
-        // Use the top-level import
-        pdfData = await pdf(bytes);
-      } catch (err) {
-        console.error("PDF parse error:", err);
-        return NextResponse.json(
-          { error: "Failed to parse PDF file. Ensure file is not corrupted." },
-          { status: 400 }
-        );
-      }
-
-      if (!pdfData.text || pdfData.text.trim().length === 0) {
-        return NextResponse.json(
-          { error: "PDF contains no extractable text" },
-          { status: 400 }
-        );
-      }
-
-      fileName = `${Date.now()}-${file.name}`;
-      textContent = pdfData.text;
-      pageCount = pdfData.numpages;
-    }
-
-    // Final Validation
-    if (textContent.trim().length === 0) {
+    if (!contentType.includes("multipart/form-data")) {
       return NextResponse.json(
-        { error: "PDF contains no extractable text" },
+        { error: "Only multipart/form-data is supported for PDF upload." },
         { status: 400 }
       );
     }
 
-    // 3. Create Vector Store
-    const storeId = uuidv4();
+    // 1. Handle Multipart FormData with PDF file
+    const formData = await request.formData();
+    const file = formData.get("pdf") as File;
 
-    await createVectorStore(fileName, textContent, storeId);
+    if (!file) {
+      return NextResponse.json(
+        { error: "No PDF file provided" },
+        { status: 400 }
+      );
+    }
 
-    // 4. Save metadata
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      return NextResponse.json(
+        { error: "File must be a PDF" },
+        { status: 400 }
+      );
+    }
+
+    // Save PDF to disk (required for LangChain PDFLoader)
+    fileName = `${Date.now()}-${file.name}`;
+    const uploadDir = path.join(process.cwd(), "uploads");
+    await fs.mkdir(uploadDir, { recursive: true });
+    const filePath = path.join(uploadDir, fileName);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(filePath, buffer);
+
+    // 3. Create vector store (this handles parsing, splitting and embeddings)
+    const result = await createVectorStore(filePath, storeId);
+    pageCount = result.pageCount || 1;
+    textLength = 0; // length is stored in metadata by createVectorStore
+
+    // 4. Create vector store and add documents
+    // The vector store creation is now handled by createVectorStore
+
+    // 5. Save metadata (custom logic, e.g. to file/db)
     saveVectorStoreMetadata(storeId, {
       fileName,
       createdAt: new Date().toISOString(),
       pageCount,
-      textLength: textContent.length,
+      textLength,
     });
 
     return NextResponse.json({
@@ -100,7 +73,7 @@ export async function POST(request: NextRequest) {
       storeId,
       fileName,
       pages: pageCount,
-      message: "PDF processed successfully",
+      message: "PDF processed and indexed with LangChain successfully",
     });
 
   } catch (error) {

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chatbotGraph } from "@/src/agent";
+// Force Node runtime for LLM & filesystem usage
+export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   try {

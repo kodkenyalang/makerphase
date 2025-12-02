@@ -1,5 +1,4 @@
 import { OpenAIEmbeddings } from "@langchain/openai";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import path from "path";
 import fs from "fs";
@@ -47,18 +46,38 @@ export async function createVectorStore(
   storeId: string
 ): Promise<{ pageCount: number; chunkCount: number }> {
   try {
-    // Load PDF using LangChain's PDFLoader
-    const loader = new PDFLoader(filePath, {
-      splitPages: true, 
-    });
+    // Use server-side pdf-parse to extract text from the PDF file
+    // (avoids relying on LangChain's document loaders which may not be present)
+    const fileBuffer = fs.readFileSync(filePath);
+    let pdfData: any;
+    try {
+      // import the internal implementation to avoid running the package's
+      // top-level demo/test code which may attempt to read './test/data/..'
+      // (some bundlers or runtimes leave `module.parent` undefined causing
+      // the demo block in `pdf-parse/index.js` to execute).
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const pdf = require("pdf-parse/lib/pdf-parse.js");
+      // pdf-parse exports a function that accepts a Buffer
+      pdfData = await pdf(fileBuffer);
+    } catch (e) {
+      console.error("pdf-parse error:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to parse PDF file: ${message}`);
+    }
 
-    const docs = await loader.load();
-
-    if (!docs || docs.length === 0) {
+    if (!pdfData || !pdfData.text || pdfData.text.trim().length === 0) {
       throw new Error("PDF contains no extractable text");
     }
 
-    const pageCount = docs.length;
+    // Create a single document and let the splitter create chunks
+    const docs = [
+      {
+        pageContent: pdfData.text,
+        metadata: { source: filePath },
+      },
+    ];
+
+    const pageCount = pdfData.numpages || 1;
 
     // Split documents into chunks using RecursiveCharacterTextSplitter
     const splitter = new RecursiveCharacterTextSplitter({
