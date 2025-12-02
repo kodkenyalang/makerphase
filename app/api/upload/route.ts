@@ -1,16 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { mkdir } from "fs/promises";
-import { existsSync } from "fs";
-import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { createVectorStore, saveVectorStoreMetadata, listVectorStores } from "@/src/vectorStore";
-
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-
-// Ensure uploads directory exists
-if (!existsSync(UPLOADS_DIR)) {
-  mkdir(UPLOADS_DIR, { recursive: true });
-}
+import pdf from "pdf-parse";
 
 /**
  * Handle PDF file upload and create vector store
@@ -24,7 +15,7 @@ export async function POST(request: NextRequest) {
     let pageCount: number;
 
     if (contentType.includes("application/json")) {
-      // Frontend pre-parsed JSON
+      // 1. Handle Frontend pre-parsed JSON
       const body = await request.json();
       fileName = body.fileName;
       textContent = body.textContent;
@@ -37,7 +28,7 @@ export async function POST(request: NextRequest) {
         );
       }
     } else {
-      // Multipart FormData with PDF file
+      // 2. Handle Multipart FormData with PDF file
       const formData = await request.formData();
       const file = formData.get("pdf") as File;
 
@@ -55,20 +46,18 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Parse PDF on backend
+      // Process PDF in memory (Serverless friendly)
       const buffer = await file.arrayBuffer();
       const bytes = Buffer.from(buffer);
 
       let pdfData;
       try {
-        // Dynamic require to avoid static import errors
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const pdfParse = require("pdf-parse");
-        pdfData = await pdfParse(bytes);
+        // Use the top-level import
+        pdfData = await pdf(bytes);
       } catch (err) {
         console.error("PDF parse error:", err);
         return NextResponse.json(
-          { error: "Failed to parse PDF file. Make sure pdf-parse is installed: npm install pdf-parse" },
+          { error: "Failed to parse PDF file. Ensure file is not corrupted." },
           { status: 400 }
         );
       }
@@ -85,6 +74,7 @@ export async function POST(request: NextRequest) {
       pageCount = pdfData.numpages;
     }
 
+    // Final Validation
     if (textContent.trim().length === 0) {
       return NextResponse.json(
         { error: "PDF contains no extractable text" },
@@ -92,13 +82,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Generate unique store ID
+    // 3. Create Vector Store
     const storeId = uuidv4();
 
-    // Create vector store with embeddings
     await createVectorStore(fileName, textContent, storeId);
 
-    // Save metadata
+    // 4. Save metadata
     saveVectorStoreMetadata(storeId, {
       fileName,
       createdAt: new Date().toISOString(),
@@ -113,6 +102,7 @@ export async function POST(request: NextRequest) {
       pages: pageCount,
       message: "PDF processed successfully",
     });
+
   } catch (error) {
     console.error("Upload error:", error);
     const message = error instanceof Error ? error.message : "Upload failed";
