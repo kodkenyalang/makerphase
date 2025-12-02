@@ -1,15 +1,13 @@
-
-
 import { OpenAIEmbeddings } from "@langchain/openai";
-import { Document } from "@langchain/core/documents";
+// No changes needed here, but ensure @langchain/community is installed
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+// No changes needed here, but ensure @langchain/textsplitters is installed
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import path from "path";
 import fs from "fs";
 import { writeFile, mkdir } from "fs/promises";
-import { tmpdir } from "os";
 
-// Simple in-memory vector store (since FAISS is not available)
+// Simple in-memory vector store
 interface VectorStoreData {
   chunks: string[];
   embeddings: number[][];
@@ -53,7 +51,7 @@ export async function createVectorStore(
   try {
     // Load PDF using LangChain's PDFLoader
     const loader = new PDFLoader(filePath, {
-      splitPages: true, // One document per page for better retrieval granularity
+      splitPages: true, 
     });
 
     const docs = await loader.load();
@@ -184,7 +182,7 @@ export async function loadVectorStore(
 export async function retrieveFromVectorStore(
   storeId: string,
   query: string,
-  topK: number = 16 // FIX: Increased from 4 to 8 for better recall
+  topK: number = 8 
 ): Promise<
   Array<{
     pageContent: string;
@@ -208,18 +206,9 @@ export async function retrieveFromVectorStore(
 
   let queryEmbedding;
   try {
-    console.log("Getting embedding with configuration:", {
-      model: "text-embedding-3-small",
-      baseURL: process.env.OPENAI_EMBEDDINGS_BASE_URL || process.env.OPENAI_BASE_URL || "default (https://api.openai.com/v1)",
-      apiKey: process.env.OPENAI_API_KEY ? `${process.env.OPENAI_API_KEY.substring(0, 10)}...` : "NOT SET",
-    });
     queryEmbedding = await embeddings.embedQuery(query);
-    console.log("Embedding successful, dimension:", queryEmbedding.length);
   } catch (embedError) {
-    console.error("Embedding error:", {
-      message: embedError instanceof Error ? embedError.message : String(embedError),
-      error: embedError,
-    });
+    console.error("Embedding error:", embedError);
     const errorMessage = embedError instanceof Error ? embedError.message : String(embedError);
     throw new Error(`Failed to get query embedding: ${errorMessage}`);
   }
@@ -244,23 +233,6 @@ export async function retrieveFromVectorStore(
 }
 
 /**
- * Delete a vector store
- */
-export function deleteVectorStore(storeId: string): boolean {
-  // Remove from cache
-  vectorStoreCache.delete(storeId);
-
-  // Remove from disk
-  const storePath = path.join(VECTOR_STORE_DIR, storeId);
-  if (fs.existsSync(storePath)) {
-    fs.rmSync(storePath, { recursive: true, force: true });
-    return true;
-  }
-
-  return false;
-}
-
-/**
  * List all available vector stores
  */
 export function listVectorStores(): string[] {
@@ -273,18 +245,4 @@ export function listVectorStores(): string[] {
     .filter((f: string) =>
       fs.statSync(path.join(VECTOR_STORE_DIR, f)).isDirectory()
     );
-}
-
-/**
- * Save metadata for a vector store
- */
-export function saveVectorStoreMetadata(
-  storeId: string,
-  metadata: Record<string, unknown>
-): void {
-  const storePath = path.join(VECTOR_STORE_DIR, storeId);
-  fs.writeFileSync(
-    path.join(storePath, "metadata.json"),
-    JSON.stringify(metadata, null, 2)
-  );
 }
