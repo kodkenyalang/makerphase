@@ -1,7 +1,5 @@
 import { OpenAIEmbeddings } from "@langchain/openai";
-// No changes needed here, but ensure @langchain/community is installed
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-// No changes needed here, but ensure @langchain/textsplitters is installed
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import path from "path";
 import fs from "fs";
@@ -245,4 +243,41 @@ export function listVectorStores(): string[] {
     .filter((f: string) =>
       fs.statSync(path.join(VECTOR_STORE_DIR, f)).isDirectory()
     );
+}
+
+/**
+ * Save metadata for a vector store
+ * (THIS WAS MISSING)
+ */
+export function saveVectorStoreMetadata(
+  storeId: string,
+  metadata: Record<string, unknown>
+): void {
+  const storePath = path.join(VECTOR_STORE_DIR, storeId);
+  
+  if (!fs.existsSync(storePath)) {
+    fs.mkdirSync(storePath, { recursive: true });
+  }
+
+  fs.writeFileSync(
+    path.join(storePath, "metadata.json"),
+    JSON.stringify(metadata, null, 2)
+  );
+}
+
+/**
+ * Delete a vector store
+ */
+export function deleteVectorStore(storeId: string): boolean {
+  // Remove from cache
+  vectorStoreCache.delete(storeId);
+
+  // Remove from disk
+  const storePath = path.join(VECTOR_STORE_DIR, storeId);
+  if (fs.existsSync(storePath)) {
+    fs.rmSync(storePath, { recursive: true, force: true });
+    return true;
+  }
+
+  return false;
 }
